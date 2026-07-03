@@ -119,21 +119,28 @@ export default function piTooling(pi: ExtensionAPI) {
 
 function registerToolsSyncCommand(pi: ExtensionAPI) {
 	const handler = async (args: string, ctx: ExtensionCommandContext) => {
+		const transcript: string[] = [];
+		const report: ProgressReporter = (message, level = "info") => {
+			transcript.push(formatFeedbackLine(message, level));
+			emitFeedback(ctx, message, level);
+		};
 		const parsedArgs = splitArgs(args);
 		const update = parsedArgs.includes("--update") || parsedArgs.includes("update");
 		const unknownArgs = parsedArgs.filter((arg) => arg !== "--update" && arg !== "update");
-		if (unknownArgs.length > 0) emitFeedback(ctx, `Tools: ignoring unknown argument(s): ${unknownArgs.join(", ")}`, "warning");
+		if (unknownArgs.length > 0) report(`Tools: ignoring unknown argument(s): ${unknownArgs.join(", ")}`, "warning");
 		const config = await loadRuntimeConfig();
-		notifyWarnings(ctx, config.warnings, "Tools");
+		notifyWarnings(ctx, config.warnings, "Tools", report);
 		const toolCount = countEnabledTools(config);
 		if (toolCount === 0) {
-			emitFeedback(ctx, "Tools: no enabled tools configured.", "warning");
+			report("Tools: no enabled tools configured.", "warning");
+			sendCommandReport(pi, "tools-sync", transcript);
 			return;
 		}
-		emitFeedback(ctx, `Tools: syncing ${toolCount} tool(s)${update ? " with updates" : ""}...`, "info");
-		const result = await syncTools(pi, config, { installMissing: true, update }, (message, level) => emitFeedback(ctx, message, level));
+		report(`Tools: syncing ${toolCount} tool(s)${update ? " with updates" : ""}...`, "info");
+		const result = await syncTools(pi, config, { installMissing: true, update }, report);
 		await registerConfiguredTools(pi);
-		emitFeedback(ctx, `Tools: installed/updated ${result.installedOrUpdated} tool(s).`, "info");
+		report(`Tools: installed/updated ${result.installedOrUpdated} tool(s).`, result.warnings.length > 0 ? "warning" : "info");
+		sendCommandReport(pi, "tools-sync", transcript);
 	};
 
 	pi.registerCommand("tools-sync", {
@@ -151,16 +158,23 @@ function registerToolsListCommand(pi: ExtensionAPI) {
 		description: "List configured Pi-managed tools",
 		handler: async (_args, ctx) => {
 			const config = await loadRuntimeConfig();
-			notifyWarnings(ctx, config.warnings, "Tools");
+			const transcript: string[] = [];
+			const report: ProgressReporter = (message, level = "info") => {
+				transcript.push(formatFeedbackLine(message, level));
+				emitFeedback(ctx, message, level);
+			};
+			notifyWarnings(ctx, config.warnings, "Tools", report);
 			if (config.tools.length === 0) {
-				emitFeedback(ctx, "Tools: no tools configured.", "warning");
+				report("Tools: no tools configured.", "warning");
+				sendCommandReport(pi, "tools-list", transcript);
 				return;
 			}
 			const lines = config.tools.flatMap((tool, index) => {
 				const disabled = tool.disabled ? " (disabled)" : "";
 				return [`${index + 1}. ${tool.name}${disabled}`, `   package: ${tool.packageSpec}`, `   bins: ${tool.bins.join(", ")}`, `   venv: ${displayPath(toolVenvDir(config.tooling, tool))}`];
 			});
-			emitFeedback(ctx, `Pi-managed tools:\n${lines.join("\n")}`, "info");
+			report(`Pi-managed tools:\n${lines.join("\n")}`, "info");
+			sendCommandReport(pi, "tools-list", transcript);
 		},
 	});
 }
@@ -439,8 +453,10 @@ function expandPath(path: string, baseDir = process.cwd()): string { let expande
 function displayPath(path: string): string { const home = homedir(); if (path === home) return "~"; const normalizedHome = home.endsWith(sep) ? home : `${home}${sep}`; return path.startsWith(normalizedHome) ? `~/${path.slice(normalizedHome.length)}` : path; }
 function piToolNameForBin(bin: string): string { if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(bin) && !BUILT_IN_TOOL_NAMES.has(bin)) return bin; const sanitized = bin.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+/, ""); return `pi_tool_${sanitized || hash(bin)}`; }
 function splitArgs(args: string): string[] { return args.split(/\s+/).map((arg) => arg.trim()).filter(Boolean); }
-function notifyWarnings(ctx: ExtensionContext | ExtensionCommandContext, warnings: string[], prefix = "Tools") { if (warnings.length === 0) return; for (const warning of warnings) emitFeedback(ctx, `${prefix}: ${warning}`, "warning"); }
+function notifyWarnings(ctx: ExtensionContext | ExtensionCommandContext, warnings: string[], prefix = "Tools", report?: ProgressReporter) { if (warnings.length === 0) return; for (const warning of warnings) (report ?? ((message, level) => emitFeedback(ctx, message, level)))(`${prefix}: ${warning}`, "warning"); }
 function emitFeedback(ctx: ExtensionContext | ExtensionCommandContext, message: string, level: FeedbackLevel = "info") { if (ctx.hasUI) { ctx.ui.notify(message, level); return; } const write = level === "error" ? console.error : level === "warning" ? console.warn : console.log; write(message); }
+function formatFeedbackLine(message: string, level: FeedbackLevel): string { return level === "info" ? message : `[${level.toUpperCase()}] ${message}`; }
+function sendCommandReport(pi: ExtensionAPI, command: string, lines: string[]) { pi.sendMessage({ customType: "pi-tooling", content: [`/${command} report`, "", ...(lines.length > 0 ? lines : ["(no output)"])].join("\n"), display: true }); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function isSafeToolName(value: string): boolean { return value !== "." && value !== ".." && /^[A-Za-z0-9_.-]+$/.test(value); }
 function isSafeBinName(value: string): boolean { return isSafeToolName(value); }
