@@ -1,0 +1,12 @@
+tooling:
+  rootDir: ~/.pi/agent/tooling
+  pythonCommand:
+    - python3
+  injectPath: true
+
+tools:
+  - name: markitdown
+    type: python
+    package: "markitdown[all]"
+    bins:
+      - markitdown

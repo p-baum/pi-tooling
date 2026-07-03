@@ -1,0 +1,42 @@
+{
+  "name": "pi-tooling",
+  "version": "0.1.0",
+  "description": "Pi package for isolated external CLI tool environments.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "tooling"
+  ],
+  "license": "MIT",
+  "files": [
+    "extensions",
+    "skills",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {
+    "typebox": "^1.3.3",
+    "yaml": "^2.8.1"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/tooling.ts",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.0.0"
+  }
+}
