@@ -32,7 +32,7 @@
     "yaml": "^2.8.1"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/tooling.ts",
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/pi-tooling.ts",
     "pack:dry-run": "npm pack --dry-run"
   },
   "devDependencies": {

@@ -90,7 +90,7 @@ tooling:
 tools: []
 `;
 
-export default function tooling(pi: ExtensionAPI) {
+export default function piTooling(pi: ExtensionAPI) {
 	void ensureUserToolsConfigFile();
 
 	pi.on("tool_call", async (event, _ctx) => {

@@ -1,0 +1,1 @@
+When making changes to the pi skill pi-tooling or the tooling extension, do not make changes to the current pi configuration - instead make changes in this repository.  This repository is the source of pi-tooling and changes here will be synced to the pi config manually by the user.
