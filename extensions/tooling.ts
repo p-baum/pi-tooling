@@ -38,6 +38,7 @@ type RuntimeConfig = {
 
 type SyncOptions = { installMissing: boolean; update: boolean };
 type ToolSyncResult = { installedOrUpdated: number; warnings: string[] };
+type InstallResult = { warnings: string[] };
 type ToolManifest = { bins?: unknown; fingerprint?: unknown };
 type ToolingState = { rootDir: string; venvDir?: string; binDir?: string; manifestDir?: string; pythonCommand: string[]; injectPath: boolean };
 
@@ -286,13 +287,17 @@ async function syncTools(pi: ExtensionAPI, config: RuntimeConfig, options: SyncO
 	let installedOrUpdated = 0;
 	const reservedBins = new Set(tools.flatMap((tool) => tool.bins));
 	for (const tool of tools) {
-		try { if ((await ensurePythonTool(pi, tool, config.tooling, options, reservedBins)).changed) installedOrUpdated += 1; }
+		try {
+			const result = await ensurePythonTool(pi, tool, config.tooling, options, reservedBins);
+			if (result.changed) installedOrUpdated += 1;
+			warnings.push(...result.warnings.map((warning) => `${tool.name}: ${warning}`));
+		}
 		catch (error) { warnings.push(`${tool.name}: ${error instanceof Error ? error.message : String(error)}`); }
 	}
 	return { installedOrUpdated, warnings };
 }
 
-async function ensurePythonTool(pi: ExtensionAPI, tool: ToolConfig, tooling: ToolingConfig, options: SyncOptions, reservedBins: Set<string>): Promise<{ changed: boolean }> {
+async function ensurePythonTool(pi: ExtensionAPI, tool: ToolConfig, tooling: ToolingConfig, options: SyncOptions, reservedBins: Set<string>): Promise<{ changed: boolean; warnings: string[] }> {
 	const venvDir = toolVenvDir(tooling, tool);
 	const venvBinDir = toolVenvBinDir(venvDir);
 	const pythonPath = join(venvBinDir, process.platform === "win32" ? "python.exe" : "python");
@@ -310,7 +315,7 @@ async function ensurePythonTool(pi: ExtensionAPI, tool: ToolConfig, tooling: Too
 		const pythonCommand = tool.pythonCommand ?? tooling.pythonCommand;
 		await execOrThrow(pi, pythonCommand[0]!, [...pythonCommand.slice(1), "-m", "venv", venvDir]);
 		await execOrThrow(pi, pythonPath, ["-m", "pip", "install", "--upgrade", "pip"]);
-		await execOrThrow(pi, pythonPath, ["-m", "pip", "install", "--upgrade", ...tool.installArgs, tool.packageSpec]);
+		var installResult = await installPythonPackage(pi, pythonPath, tool);
 		changed = true;
 	}
 	for (const bin of tool.bins) {
@@ -320,7 +325,54 @@ async function ensurePythonTool(pi: ExtensionAPI, tool: ToolConfig, tooling: Too
 	await removeStaleShims(tooling, manifest, tool, reservedBins);
 	for (const bin of tool.bins) await writeToolShim(tooling, venvDir, bin);
 	if (changed || !fingerprintMatches) await writeToolManifest(manifestPath, { version: 1, name: tool.name, type: tool.type, packageSpec: tool.packageSpec, bins: tool.bins, venvDir, fingerprint, installedAt: new Date().toISOString() });
-	return { changed };
+	return { changed, warnings: installResult?.warnings ?? [] };
+}
+
+async function installPythonPackage(pi: ExtensionAPI, pythonPath: string, tool: ToolConfig): Promise<InstallResult> {
+	const parsed = parseSimplePythonRequirement(tool.packageSpec);
+	if (!parsed) {
+		await execOrThrow(pi, pythonPath, ["-m", "pip", "install", "--upgrade", ...tool.installArgs, tool.packageSpec]);
+		return { warnings: [] };
+	}
+
+	await execOrThrow(pi, pythonPath, ["-m", "pip", "install", "--upgrade", "--no-deps", ...tool.installArgs, tool.packageSpec]);
+	const dependencies = await listInstalledPackageDependencies(pi, pythonPath, parsed.name, parsed.extras);
+	const warnings: string[] = [];
+	for (const dependency of dependencies) {
+		const result = await pi.exec(pythonPath, ["-m", "pip", "install", "--upgrade", dependency], { timeout: COMMAND_TIMEOUT_MS });
+		if (result.code !== 0) {
+			const details = [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n");
+			warnings.push(`skipped dependency ${JSON.stringify(dependency)} after install failure${details ? `:\n${details}` : ""}`);
+		}
+	}
+	return { warnings };
+}
+
+function parseSimplePythonRequirement(packageSpec: string): { name: string; extras: string[] } | undefined {
+	const match = /^\s*([A-Za-z0-9_.-]+)\s*(?:\[([^\]]+)\])?\s*(?:[<>=!~].*)?$/.exec(packageSpec);
+	if (!match) return undefined;
+	return { name: match[1]!, extras: (match[2] ?? "").split(",").map((extra) => extra.trim()).filter(Boolean) };
+}
+
+async function listInstalledPackageDependencies(pi: ExtensionAPI, pythonPath: string, packageName: string, extras: string[]): Promise<string[]> {
+	const script = `
+import json
+from importlib import metadata
+try:
+    from pip._vendor.packaging.requirements import Requirement
+except Exception:
+    from packaging.requirements import Requirement
+extras = ${JSON.stringify(extras)}
+dist = metadata.distribution(${JSON.stringify(packageName)})
+deps = []
+for raw in dist.requires or []:
+    req = Requirement(raw)
+    if req.marker is None or any(req.marker.evaluate({"extra": extra}) for extra in extras):
+        deps.append(str(req))
+print(json.dumps(deps))
+`;
+	const result = await execOrThrow(pi, pythonPath, ["-c", script]);
+	return JSON.parse(result.stdout.trim()) as string[];
 }
 
 async function readToolManifest(path: string): Promise<ToolManifest | undefined> { if (!existsSync(path)) return undefined; try { const manifest = JSON.parse(await readFile(path, "utf8")) as unknown; return isRecord(manifest) ? manifest : undefined; } catch { return undefined; } }
@@ -341,7 +393,7 @@ function toolVenvDir(tooling: ToolingConfig, tool: ToolConfig): string { return 
 function toolVenvBinDir(venvDir: string): string { return join(venvDir, process.platform === "win32" ? "Scripts" : "bin"); }
 function injectToolingPath(command: string, tooling: ToolingConfig): string { if (command.includes(TOOLING_BASH_MARKER)) return command; return `${TOOLING_BASH_MARKER}\nexport PI_TOOLING_ROOT=${shellQuote(tooling.rootDir)}\nexport PI_TOOL_BIN=${shellQuote(tooling.binDir)}\nexport PATH=${shellQuote(tooling.binDir)}:$PATH\nunset PYTHONHOME PYTHONPATH\n# pi-tooling end\n\n${command}`; }
 function toolingPromptGuidance(config: RuntimeConfig): string | undefined { if (!config.tooling.injectPath) return undefined; const bins = [...new Set(config.tools.filter((tool) => !tool.disabled).flatMap((tool) => tool.bins))].sort(); if (bins.length === 0) return undefined; return ["Pi-managed command-line tools are available on PATH from the Pi tooling shim directory.", `Configured Pi-managed commands: ${bins.length > 30 ? `${bins.slice(0, 30).join(", ")}, ...` : bins.join(", ")}.`, "Use these commands directly when relevant.", "Do not install Python packages into the current project virtualenv for agent tooling.", "Do not run pip install for tool setup; use /tools-sync instead."].join("\n"); }
-async function execOrThrow(pi: ExtensionAPI, command: string, args: string[]) { const result = await pi.exec(command, args, { timeout: COMMAND_TIMEOUT_MS }); if (result.code === 0) return; const details = [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n"); throw new Error(`${command} ${args.join(" ")} failed with exit code ${result.code}${details ? `:\n${details}` : ""}`); }
+async function execOrThrow(pi: ExtensionAPI, command: string, args: string[]) { const result = await pi.exec(command, args, { timeout: COMMAND_TIMEOUT_MS }); if (result.code === 0) return result; const details = [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n"); throw new Error(`${command} ${args.join(" ")} failed with exit code ${result.code}${details ? `:\n${details}` : ""}`); }
 function normalizeCommand(value: unknown, label: string, warnings: string[]): string[] | undefined { if (value === undefined) return undefined; if (typeof value === "string" && value.trim()) return [value.trim()]; if (Array.isArray(value) && value.every((item) => typeof item === "string")) { const command = value.map((item) => item.trim()).filter(Boolean); if (command.length > 0) return command; } warnings.push(`${label} must be a non-empty string or array of strings.`); return undefined; }
 function normalizeStringList(value: unknown, label: string, warnings: string[]): string[] | undefined { if (value === undefined) return undefined; if (typeof value === "string") return [value]; if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value; warnings.push(`${label} must be a string or array of strings when provided.`); return undefined; }
 function dedupeTools(tools: ToolConfig[], warnings: string[]): ToolConfig[] { const byName = new Map<string, ToolConfig>(); for (const tool of tools) byName.set(tool.name, tool); const binOwners = new Map<string, string>(); const deduped: ToolConfig[] = []; for (const tool of byName.values()) { if (!tool.disabled) { const conflictingBin = tool.bins.find((bin) => binOwners.has(bin)); if (conflictingBin) { warnings.push(`${tool.origin}: tool ${JSON.stringify(tool.name)} skipped because bin ${JSON.stringify(conflictingBin)} conflicts with tool ${JSON.stringify(binOwners.get(conflictingBin))}.`); continue; } for (const bin of tool.bins) binOwners.set(bin, tool.name); } deduped.push(tool); } return deduped; }
