@@ -74,7 +74,23 @@ For GitHub Python tools, use the package spec given by the source repository's i
 9. Add one tool entry with an explicit `bins` list and, when needed, an explicit `pythonCommand`.
 10. Run `/tools-sync`.
 11. Run `/tools-list`.
-12. Report the command(s) now available and the Python version used.
+12. Run a lightweight validation command for each installed bin when one is available, preferably `--version` or `--help`. Capture stdout and stderr even when the command exits successfully.
+13. Report the command(s) now available, the Python version used, and any non-fatal warnings observed during sync or validation.
+
+## Reporting non-fatal installation and runtime warnings
+
+Treat warnings emitted during install, sync, listing, or validation as part of the installation outcome, even when the tool technically installed and the command returned exit code 0.
+
+In the final report:
+
+- Include a `Warnings` or `Notes` section when output mentions missing optional executables, skipped dependencies, ignored dependency failures, fallback behavior, deprecations that may affect the tool, or runtime warnings from a validation command.
+- Quote or summarize the relevant warning text and name the affected command or feature.
+- Distinguish between:
+  - **blocking failures**: the configured bin is missing, sync failed, or the validation command cannot run;
+  - **non-fatal warnings**: the CLI runs, but some optional capability may not work.
+- Advise concrete remediation when possible. Prefer project/tool documentation first; otherwise suggest installing the missing system dependency through the user's OS package manager or a user-local tool manager. Do not run root/package-manager installs without explicit user approval.
+- If remediation requires a system package, say that the user may need to install it outside Pi tooling. For example, if a tool warns `Couldn't find ffmpeg or avconv`, report that audio/video conversion may fail and suggest installing `ffmpeg` (or `libav`/`avconv` if their platform provides it), then rerun the validation command.
+- If no warnings were observed, say so briefly.
 
 ## Private Python versions
 
