@@ -363,12 +363,19 @@ try:
 except Exception:
     from packaging.requirements import Requirement
 extras = ${JSON.stringify(extras)}
+marker_contexts = extras or [""]
 dist = metadata.distribution(${JSON.stringify(packageName)})
 deps = []
+seen = set()
 for raw in dist.requires or []:
     req = Requirement(raw)
-    if req.marker is None or any(req.marker.evaluate({"extra": extra}) for extra in extras):
-        deps.append(str(req))
+    if req.marker is not None and not any(req.marker.evaluate({"extra": extra}) for extra in marker_contexts):
+        continue
+    req.marker = None
+    dependency = str(req)
+    if dependency not in seen:
+        seen.add(dependency)
+        deps.append(dependency)
 print(json.dumps(deps))
 `;
 	const result = await execOrThrow(pi, pythonPath, ["-c", script]);
