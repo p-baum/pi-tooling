@@ -57,8 +57,11 @@ tools:
 ```text
 /tools-sync           Install missing or changed tools
 /tools-sync --update  Rebuild/update all configured tools
+/tool-sync update     Alias for /tools-sync --update
 /tools-list           Show configured tools, bins, and venv paths
 ```
+
+In non-interactive/print mode, these commands write progress and warnings to stdout/stderr.
 
 Tools are installed under:
 

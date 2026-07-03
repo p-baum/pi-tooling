@@ -14,7 +14,7 @@ Prefer the best supported Python version for each tool, not necessarily the syst
 ## Intents
 
 - If the user says "sync the tools", "install missing tools", or similar: run `/tools-sync`.
-- If the user says "update the tools", "upgrade tools", "refresh all tools", or similar: run `/tools-sync --update`.
+- If the user says "update the tools", "upgrade tools", "refresh all tools", or similar: run `/tools-sync --update`. `/tool-sync update` is accepted as a compatibility alias, but prefer the canonical command.
 - If the user asks to list/show tools: run `/tools-list`.
 - If the user asks to install/add a tool: edit `~/.pi/agent/tools.yaml`, then run `/tools-sync` and `/tools-list`.
 

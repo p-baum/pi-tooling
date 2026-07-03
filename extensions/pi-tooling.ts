@@ -37,6 +37,8 @@ type RuntimeConfig = {
 };
 
 type SyncOptions = { installMissing: boolean; update: boolean };
+type FeedbackLevel = "info" | "warning" | "error";
+type ProgressReporter = (message: string, level?: FeedbackLevel) => void;
 type ToolSyncResult = { installedOrUpdated: number; warnings: string[] };
 type InstallResult = { warnings: string[] };
 type ToolManifest = { bins?: unknown; fingerprint?: unknown };
@@ -116,23 +118,31 @@ export default function piTooling(pi: ExtensionAPI) {
 }
 
 function registerToolsSyncCommand(pi: ExtensionAPI) {
+	const handler = async (args: string, ctx: ExtensionCommandContext) => {
+		const parsedArgs = splitArgs(args);
+		const update = parsedArgs.includes("--update") || parsedArgs.includes("update");
+		const unknownArgs = parsedArgs.filter((arg) => arg !== "--update" && arg !== "update");
+		if (unknownArgs.length > 0) emitFeedback(ctx, `Tools: ignoring unknown argument(s): ${unknownArgs.join(", ")}`, "warning");
+		const config = await loadRuntimeConfig();
+		notifyWarnings(ctx, config.warnings, "Tools");
+		const toolCount = countEnabledTools(config);
+		if (toolCount === 0) {
+			emitFeedback(ctx, "Tools: no enabled tools configured.", "warning");
+			return;
+		}
+		emitFeedback(ctx, `Tools: syncing ${toolCount} tool(s)${update ? " with updates" : ""}...`, "info");
+		const result = await syncTools(pi, config, { installMissing: true, update }, (message, level) => emitFeedback(ctx, message, level));
+		await registerConfiguredTools(pi);
+		emitFeedback(ctx, `Tools: installed/updated ${result.installedOrUpdated} tool(s).`, "info");
+	};
+
 	pi.registerCommand("tools-sync", {
 		description: "Install/update configured Pi-managed tools",
-		handler: async (args, ctx) => {
-			const update = splitArgs(args).includes("--update");
-			const config = await loadRuntimeConfig();
-			notifyWarnings(ctx, config.warnings, "Tools");
-			const toolCount = countEnabledTools(config);
-			if (toolCount === 0) {
-				ctx.ui.notify("Tools: no enabled tools configured.", "warning");
-				return;
-			}
-			ctx.ui.notify(`Tools: syncing ${toolCount} tool(s)${update ? " with updates" : ""}...`, "info");
-			const result = await syncTools(pi, config, { installMissing: true, update });
-			notifyWarnings(ctx, result.warnings, "Tools");
-			await registerConfiguredTools(pi);
-			ctx.ui.notify(`Tools: installed/updated ${result.installedOrUpdated} tool(s).`, "info");
-		},
+		handler,
+	});
+	pi.registerCommand("tool-sync", {
+		description: "Alias for /tools-sync",
+		handler,
 	});
 }
 
@@ -143,14 +153,14 @@ function registerToolsListCommand(pi: ExtensionAPI) {
 			const config = await loadRuntimeConfig();
 			notifyWarnings(ctx, config.warnings, "Tools");
 			if (config.tools.length === 0) {
-				ctx.ui.notify("Tools: no tools configured.", "warning");
+				emitFeedback(ctx, "Tools: no tools configured.", "warning");
 				return;
 			}
 			const lines = config.tools.flatMap((tool, index) => {
 				const disabled = tool.disabled ? " (disabled)" : "";
 				return [`${index + 1}. ${tool.name}${disabled}`, `   package: ${tool.packageSpec}`, `   bins: ${tool.bins.join(", ")}`, `   venv: ${displayPath(toolVenvDir(config.tooling, tool))}`];
 			});
-			ctx.ui.notify(`Pi-managed tools:\n${lines.join("\n")}`, "info");
+			emitFeedback(ctx, `Pi-managed tools:\n${lines.join("\n")}`, "info");
 		},
 	});
 }
@@ -277,7 +287,7 @@ function finalizeToolingConfig(state: ToolingState): ToolingConfig {
 	return { rootDir: state.rootDir, venvDir: state.venvDir ?? join(state.rootDir, "venvs"), binDir: state.binDir ?? join(state.rootDir, "bin"), manifestDir: state.manifestDir ?? join(state.rootDir, "manifests"), pythonCommand: state.pythonCommand.length > 0 ? state.pythonCommand : [...DEFAULT_PYTHON_COMMAND], injectPath: state.injectPath };
 }
 
-async function syncTools(pi: ExtensionAPI, config: RuntimeConfig, options: SyncOptions): Promise<ToolSyncResult> {
+async function syncTools(pi: ExtensionAPI, config: RuntimeConfig, options: SyncOptions, report?: ProgressReporter): Promise<ToolSyncResult> {
 	const tools = config.tools.filter((tool) => !tool.disabled);
 	if (tools.length === 0) return { installedOrUpdated: 0, warnings: [] };
 	await mkdir(config.tooling.venvDir, { recursive: true });
@@ -287,17 +297,31 @@ async function syncTools(pi: ExtensionAPI, config: RuntimeConfig, options: SyncO
 	let installedOrUpdated = 0;
 	const reservedBins = new Set(tools.flatMap((tool) => tool.bins));
 	for (const tool of tools) {
+		report?.(`Tools: ${tool.name}: checking...`, "info");
 		try {
-			const result = await ensurePythonTool(pi, tool, config.tooling, options, reservedBins);
-			if (result.changed) installedOrUpdated += 1;
-			warnings.push(...result.warnings.map((warning) => `${tool.name}: ${warning}`));
+			const result = await ensurePythonTool(pi, tool, config.tooling, options, reservedBins, report);
+			if (result.changed) {
+				installedOrUpdated += 1;
+				report?.(`Tools: ${tool.name}: installed/updated.`, "info");
+			} else {
+				report?.(`Tools: ${tool.name}: already up to date.`, "info");
+			}
+			for (const warning of result.warnings) {
+				const message = `${tool.name}: ${warning}`;
+				warnings.push(message);
+				report?.(`Tools: ${message}`, "warning");
+			}
 		}
-		catch (error) { warnings.push(`${tool.name}: ${error instanceof Error ? error.message : String(error)}`); }
+		catch (error) {
+			const message = `${tool.name}: ${error instanceof Error ? error.message : String(error)}`;
+			warnings.push(message);
+			report?.(`Tools: ${message}`, "warning");
+		}
 	}
 	return { installedOrUpdated, warnings };
 }
 
-async function ensurePythonTool(pi: ExtensionAPI, tool: ToolConfig, tooling: ToolingConfig, options: SyncOptions, reservedBins: Set<string>): Promise<{ changed: boolean; warnings: string[] }> {
+async function ensurePythonTool(pi: ExtensionAPI, tool: ToolConfig, tooling: ToolingConfig, options: SyncOptions, reservedBins: Set<string>, report?: ProgressReporter): Promise<{ changed: boolean; warnings: string[] }> {
 	const venvDir = toolVenvDir(tooling, tool);
 	const venvBinDir = toolVenvBinDir(venvDir);
 	const pythonPath = join(venvBinDir, process.platform === "win32" ? "python.exe" : "python");
@@ -310,12 +334,14 @@ async function ensurePythonTool(pi: ExtensionAPI, tool: ToolConfig, tooling: Too
 	if (needsInstall && !options.installMissing && !options.update) throw new Error("not installed or out of date; run /tools-sync");
 	let changed = false;
 	if (needsInstall) {
+		report?.(`Tools: ${tool.name}: creating virtualenv...`, "info");
 		await rm(venvDir, { recursive: true, force: true });
 		await mkdir(dirname(venvDir), { recursive: true });
 		const pythonCommand = tool.pythonCommand ?? tooling.pythonCommand;
 		await execOrThrow(pi, pythonCommand[0]!, [...pythonCommand.slice(1), "-m", "venv", venvDir]);
+		report?.(`Tools: ${tool.name}: upgrading pip...`, "info");
 		await execOrThrow(pi, pythonPath, ["-m", "pip", "install", "--upgrade", "pip"]);
-		var installResult = await installPythonPackage(pi, pythonPath, tool);
+		var installResult = await installPythonPackage(pi, pythonPath, tool, report);
 		changed = true;
 	}
 	for (const bin of tool.bins) {
@@ -328,17 +354,20 @@ async function ensurePythonTool(pi: ExtensionAPI, tool: ToolConfig, tooling: Too
 	return { changed, warnings: installResult?.warnings ?? [] };
 }
 
-async function installPythonPackage(pi: ExtensionAPI, pythonPath: string, tool: ToolConfig): Promise<InstallResult> {
+async function installPythonPackage(pi: ExtensionAPI, pythonPath: string, tool: ToolConfig, report?: ProgressReporter): Promise<InstallResult> {
 	const parsed = parseSimplePythonRequirement(tool.packageSpec);
 	if (!parsed) {
+		report?.(`Tools: ${tool.name}: installing ${tool.packageSpec}...`, "info");
 		await execOrThrow(pi, pythonPath, ["-m", "pip", "install", "--upgrade", ...tool.installArgs, tool.packageSpec]);
 		return { warnings: [] };
 	}
 
+	report?.(`Tools: ${tool.name}: installing ${tool.packageSpec}...`, "info");
 	await execOrThrow(pi, pythonPath, ["-m", "pip", "install", "--upgrade", "--no-deps", ...tool.installArgs, tool.packageSpec]);
 	const dependencies = await listInstalledPackageDependencies(pi, pythonPath, parsed.name, parsed.extras);
 	const warnings: string[] = [];
 	for (const dependency of dependencies) {
+		report?.(`Tools: ${tool.name}: installing dependency ${dependency}...`, "info");
 		const result = await pi.exec(pythonPath, ["-m", "pip", "install", "--upgrade", dependency], { timeout: COMMAND_TIMEOUT_MS });
 		if (result.code !== 0) {
 			const details = [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n");
@@ -410,7 +439,8 @@ function expandPath(path: string, baseDir = process.cwd()): string { let expande
 function displayPath(path: string): string { const home = homedir(); if (path === home) return "~"; const normalizedHome = home.endsWith(sep) ? home : `${home}${sep}`; return path.startsWith(normalizedHome) ? `~/${path.slice(normalizedHome.length)}` : path; }
 function piToolNameForBin(bin: string): string { if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(bin) && !BUILT_IN_TOOL_NAMES.has(bin)) return bin; const sanitized = bin.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+/, ""); return `pi_tool_${sanitized || hash(bin)}`; }
 function splitArgs(args: string): string[] { return args.split(/\s+/).map((arg) => arg.trim()).filter(Boolean); }
-function notifyWarnings(ctx: ExtensionContext | ExtensionCommandContext, warnings: string[], prefix = "Tools") { if (!ctx.hasUI || warnings.length === 0) return; for (const warning of warnings) ctx.ui.notify(`${prefix}: ${warning}`, "warning"); }
+function notifyWarnings(ctx: ExtensionContext | ExtensionCommandContext, warnings: string[], prefix = "Tools") { if (warnings.length === 0) return; for (const warning of warnings) emitFeedback(ctx, `${prefix}: ${warning}`, "warning"); }
+function emitFeedback(ctx: ExtensionContext | ExtensionCommandContext, message: string, level: FeedbackLevel = "info") { if (ctx.hasUI) { ctx.ui.notify(message, level); return; } const write = level === "error" ? console.error : level === "warning" ? console.warn : console.log; write(message); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function isSafeToolName(value: string): boolean { return value !== "." && value !== ".." && /^[A-Za-z0-9_.-]+$/.test(value); }
 function isSafeBinName(value: string): boolean { return isSafeToolName(value); }
